@@ -1,6 +1,7 @@
 #!/usr/local/bin/python3
 import subprocess
 import argparse
+import sys
 
 def color(text, name):
     end = '\033[0m'
@@ -15,27 +16,28 @@ def color(text, name):
         CYAN = "\033[44m",
         REVERSED = "\033[7m",
     )[name.upper()]
-    return "{}{}{}".format(clr, text, end)
+    return f"{clr}{text}{end}"
 
 def cmd(cmd, *args):
-    cmd = "kubectl {}".format(cmd.format(*args))
+    cmd = f"kubectl {cmd.format(*args)}"
     out = subprocess.check_output(cmd, shell=True).decode("utf-8").split("\n")
     return [item for item in out if item]
 
 def display(content):
-    print(color("   {}".format(content.pop(0)) , "reversed"))
+    print(color(f"   {content.pop(0)}", "reversed"))
     for index, item in enumerate(content):
+        index += 1
         if "*" in item:
-            print(color("{}. {}".format(index, item), "cyan"))
+            print(color(f"{index}. {item}", "cyan"))
             continue
-        print(color("{}. {}".format(index, item), "okblue"))
+        print(color(f"{index}. {item}", "okblue"))
 
 def prompt(content):
     def choice():
         print()
         display([*content])
         try:
-            val = str(input(color("Select option (1-{}): ", "underline".format(len(content)))))
+            val = str(input(color(f"Select option (1-{len(content)}): ", "underline")))
             if val.isdigit() and int(val) < len(content):
                 return int(val)
         except NameError:
@@ -43,16 +45,22 @@ def prompt(content):
         print("Invalid input")
         return choice()
 
-    value = choice()
+    value = choice() - 1
     return tuple(content[value].split())
 
-def main():
-    parser = argparse.ArgumentParser("Select Context")
-    parser.add_argument("ctx", nargs="?", type=str, help="context to switch")
-    parser.add_argument("-i", "--interactive", help="select context interactively", action="store_true")
-    args = parser.parse_args()
-    contexts = cmd("config get-contexts")
-    if args.ctx == None and not args.interactive:
+def search_context(contexts, needle):
+    if needle.isdigit() and int(needle) > 0:
+        needle = int(needle)
+        if needle >= len(contexts):
+            return None
+        return contexts[int(needle)].replace("*", '')
+    ctx = list(filter(lambda x: needle in x, contexts))
+    if len(ctx) < 1:
+        return None
+    return ctx[0].replace("*", '')
+
+def main(args, contexts):
+    if args.ctx == 0 and not args.interactive:
         display(contexts)
         return
 
@@ -66,13 +74,30 @@ def main():
         return
 
     try:
-        out = cmd("config use-context {}".format(args.ctx))
+        ctx = search_context(contexts, args.ctx)
+        if ctx is None:
+            print("context was not found")
+            sys.exit(1)
+        out = cmd(f"config use-context {ctx.split()[0]}")
         print(color("\n".join(out), "okgreen"))
     except subprocess.CalledProcessError as e:
         pass
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser("Select Context")
+    parser.add_argument("ctx", help="context to switch", nargs="*")
+    parser.add_argument("-i", "--interactive", help="select context interactively", action="store_true")
+
+    contexts = cmd("config get-contexts")
+    args = parser.parse_args()
+
+    if len(sys.argv) < 2 and not args.interactive:
+        display(contexts)
+        sys.exit(0)
+
+    args.ctx = args.ctx[0]
     try:
-        main()
+        main(args, contexts)
     except KeyboardInterrupt:
         pass
