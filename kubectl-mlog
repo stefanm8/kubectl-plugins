@@ -56,7 +56,7 @@ class Utility:
 
     @staticmethod
     def format_color(strn, color="red"):
-        return "{}{}{}".format(COLORS[color], strn, C_END)
+        return f"{COLORS[color]}{strn}{C_END}"
 
     @staticmethod
     def find(needle, data, key=None, inverse=False):
@@ -70,9 +70,9 @@ class Utility:
     def prompt_user_choice(choices, prompt="Select which item: "):
         choices_txt = ""
         for index, item in enumerate(choices):
-            choices_txt += "{}. {}\n".format(index + 1, item)
+            choices_txt += f"{index+1}. {item}\n"
 
-        user_choice = input("{}\n{}".format(choices_txt, prompt))
+        user_choice = input(f"{choices_txt}\n{prompt}")
         return choices[int(user_choice) - 1]
 
 class Base:
@@ -156,18 +156,18 @@ class Kubectl(Command):
     def __format_args(self, **kwargs):
         return " ".join(
             [
-                "{} {}".format(k, v) if type(v) != bool else "{}".format(k)
+                f"{k} {v}" if type(v) != bool else f"{k}"
                 for k, v in kwargs.items()
             ]
         )
 
     def kube_cmd(self, cmd, **kwargs):
         if self.namespace != None:
-            cmd = "{} -n {}".format(cmd, self.namespace)
-        return "{} {}".format(cmd, self.__format_args(**kwargs))
+            cmd = f"{cmd} -n {self.namespace}"
+        return f"{cmd} {self.__format_args(**kwargs)}"
 
     def __get(self, resource, csv=False, **kwargs):
-        cmd = self.kube_cmd("kubectl get {}".format(resource), **kwargs)
+        cmd = self.kube_cmd(f"kubectl get {resource}", **kwargs)
         data = self.run(cmd)
         if csv:
             return self.__parse_csv(data)
@@ -180,7 +180,7 @@ class Kubectl(Command):
         return pods
 
     def logs(self, pod, func=None, color="", **kwargs):
-        cmd = self.kube_cmd("kubectl logs {}".format(pod), **kwargs)
+        cmd = self.kube_cmd(f"kubectl logs {pod}", **kwargs)
         return self.run_realtime(cmd, func=func, owner=pod, color=color)
 
     def get_contexts(self):
@@ -199,7 +199,7 @@ class Kubectl(Command):
         if len(filtered) > 1:
             return Utility.prompt_user_choice(filtered)
         elif len(filtered) < 1:
-            Utility.error("Context: {} not found".format("name"), sysexit=True)
+            Utility.error("Context: name not found", sysexit=True)
             return
 
         return filtered[0]
