@@ -23,31 +23,20 @@ def cmd(cmd, *args):
     out = subprocess.check_output(cmd, shell=True).decode("utf-8").split("\n")
     return [item for item in out if item]
 
-def display(content):
-    print(color(f"   {content.pop(0)}", "reversed"))
+def display(content, prompt=False):
+    print(f"{content.pop(0)}")
     for index, item in enumerate(content):
         index += 1
         if "*" in item:
-            print(color(f"{index}. {item}", "cyan"))
+            if prompt:
+                print(color(f"{index}. {item}", "warning"))
+            else:
+                print(color(item, "warning"))
             continue
-        print(color(f"{index}. {item}", "okblue"))
-
-def prompt(content):
-    def choice():
-        print()
-        display([*content])
-        try:
-            # Minus the header 
-            val = str(input(color(f"Select option (1-{len(content)-1}): ", "underline"))) 
-            if val.isdigit() and int(val) < len(content):
-                return int(val)
-        except NameError:
-            pass
-        print("Invalid input")
-        return choice()
-
-    value = choice()
-    return tuple(content[value].split())
+        if prompt:
+            print(f"{index}. {item}")
+        else:
+            print(item)
 
 def search_context(contexts, needle):
     if needle.isdigit() and int(needle) > 0:
@@ -61,15 +50,6 @@ def search_context(contexts, needle):
     return ctx[0].replace("*", '')
 
 def main(args, contexts):
-    if args.interactive:
-        ch = tuple(prompt(contexts))
-        if len(ch) == 4:
-            name = ch[0]
-        else:
-            name = ch[1]
-        print(' '.join(cmd(f"config use-context {name}")))
-        return
-
     try:
         ctx = search_context(contexts, args.ctx)
         if ctx is None:
@@ -83,12 +63,11 @@ def main(args, contexts):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("Select Context")
     parser.add_argument("ctx", help="context to switch", nargs="*")
-    parser.add_argument("-i", "--interactive", help="select context interactively", action="store_true")
 
     contexts = cmd("config get-contexts")
     args = parser.parse_args()
 
-    if len(sys.argv) < 2 and not args.interactive:
+    if len(sys.argv) < 2:
         display(contexts)
         sys.exit(0)
 
