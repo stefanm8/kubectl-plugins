@@ -1,0 +1,384 @@
+#!/usr/local/bin/python3
+import time
+import subprocess
+import os
+import argparse
+import threading
+import re
+import datetime
+import fcntl
+import sys
+import signal
+import random
+
+
+ERROR_KEYWORDS = [
+    "stacktrace",
+    "unexpect",
+    "crash",
+    "error",
+    "stop",
+    "exit",
+    "retry",
+    "timeout",
+    "fail",
+    "internal.?server.?error",
+    "bad.?gateway",
+    "restart",
+    "exception",
+    '"level": "ERROR".*',
+]
+
+COLORS = {
+    "blue": "\033[94m", 
+    "red": "\033[91m", 
+    "green": "\033[92m",
+    "magenta": "\033[95m",
+    "yellow": "\033[93m",
+    "cyan":"\033[36m", 
+    "grey":"\033[37m", 
+    "darkgreen":"\033[32m", 
+}
+C_END = "\033[0m"
+REGX_SUB = r"\x1b\[\d+m"
+THREADS = {}
+REGX = r"(?i)({})(.*)".format("|".join(ERROR_KEYWORDS))
+FNULL = open(os.devnull, "w")
+
+class Utility:
+    # Static class for grouping utility functions
+
+    @staticmethod
+    def error(msg, sysexit=False):
+        print(Utility.format_color("error: " + msg))
+        if sysexit:
+            sys.exit(1)
+
+    @staticmethod
+    def format_color(strn, color="red"):
+        return "{}{}{}".format(COLORS[color], strn, C_END)
+
+    @staticmethod
+    def find(needle, data, key=None, inverse=False):
+        cond = lambda x: x if key in x and needle in x[key] else None 
+        if inverse:
+            cond = lambda x: x if needle in x.get(key, "") else None
+
+        return list(filter(cond, data))
+
+    @staticmethod
+    def prompt_user_choice(choices, prompt="Select which item: "):
+        choices_txt = ""
+        for index, item in enumerate(choices):
+            choices_txt += "{}. {}\n".format(index + 1, item)
+
+        user_choice = input("{}\n{}".format(choices_txt, prompt))
+        return choices[int(user_choice) - 1]
+
+class Base:
+    """Base class for loading configuration"""
+
+    name = ""
+    inverse = False
+    verbose = False
+    namespace = None
+    context = None
+    save_output = None
+
+    def __init__(self, *args, **kwargs):
+        for k, v in kwargs.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
+
+class Command(Base):
+    """Command class for executing shell commands"""
+
+    raw_cmd = None
+    cmd = None
+    dry_run = None
+
+    def parse_command(self, cmd, shell=True):
+        self.raw_cmd = cmd
+        self.cmd = list(map(lambda x: x.strip(), cmd.split(" ")))
+        if shell:
+            return self.raw_cmd
+        return self.cmd
+
+    def read(self, output):
+        fd = output.fileno()
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        try:
+            return output.read()
+        except Exception as e:
+            print(e)
+            return ""
+
+    def run(self, cmd, shell=True, **kwargs):
+        p = subprocess.check_output(cmd, shell=shell)
+        return p.decode("utf-8")
+
+    def run_realtime(self, cmd, func=None, shell=True, **kwargs):
+        cmd = self.parse_command(cmd, shell=shell)
+        if self.verbose or self.dry_run:
+            if self.dry_run:
+                return None, 0
+            print(self.raw_cmd)
+
+        process = subprocess.Popen(
+            cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        stdout = []
+        while True:
+            line = process.stdout.readline().decode("utf-8")
+            stdout.append(line)
+            if line == "" and rc is not None:
+                break
+            if line and func is not None:
+                func(line.strip(), **kwargs)
+            rc = process.poll()
+        return "\n".join(stdout), rc
+
+
+class Kubectl(Command):
+    saved_output = ""
+
+    def __init__(self, *args, **kwargs):
+        Command.__init__(self, *args, **kwargs)
+        self.set_context()
+
+    def __parse_csv(self, data):
+        rows = list(map(lambda x: x.split(), data.split("\n")))
+        cols = rows.pop(0)
+        cols = list(map(lambda x: x.lower(), cols))
+        return [{cols[index]: item for index, item in enumerate(r)} for r in rows]
+
+    def __format_args(self, **kwargs):
+        return " ".join(
+            [
+                "{} {}".format(k, v) if type(v) != bool else "{}".format(k)
+                for k, v in kwargs.items()
+            ]
+        )
+
+    def kube_cmd(self, cmd, **kwargs):
+        if self.namespace != None:
+            cmd = "{} -n {}".format(cmd, self.namespace)
+        return "{} {}".format(cmd, self.__format_args(**kwargs))
+
+    def __get(self, resource, csv=False, **kwargs):
+        cmd = self.kube_cmd("kubectl get {}".format(resource), **kwargs)
+        data = self.run(cmd)
+        if csv:
+            return self.__parse_csv(data)
+        return data
+
+    def get_pods(self, pod_token, csv=True, **kwargs):
+        pods = self.__get("pods", csv=csv, **kwargs)
+        if csv:
+            return Utility.find(pod_token, pods, key="name", inverse=self.inverse)
+        return pods
+
+    def logs(self, pod, func=None, color="", **kwargs):
+        cmd = self.kube_cmd("kubectl logs {}".format(pod), **kwargs)
+        return self.run_realtime(cmd, func=func, owner=pod, color=color)
+
+    def get_contexts(self):
+        cmd = self.kube_cmd("kubectl config get-contexts -oname")
+        d = self.run(cmd, shell=True)
+        return d.splitlines()
+
+    def switch_context(self, ctx):
+        cmd = self.kube_cmd("kubectl config use-context {}".format(ctx))
+        return self.run(cmd, shell=True)
+
+    def get_ctx(self):
+        ctxs = self.get_contexts()
+        filtered = list(filter(lambda x: self.context in x, ctxs))
+
+        if len(filtered) > 1:
+            return Utility.prompt_user_choice(filtered)
+        elif len(filtered) < 1:
+            Utility.error("Context: {} not found".format("name"), sysexit=True)
+            return
+
+        return filtered[0]
+
+    def set_context(self):
+        if self.context is None:
+            return
+        ctx = self.get_ctx()
+        if ctx is None:
+            return
+        return self.switch_context(ctx)
+
+class Logger(Base):
+
+    lines = 1
+    follow = False
+    highlight = False
+    regx = r"(?i)({})(.*)".format("|".join(ERROR_KEYWORDS))
+    custom_regx = ""
+    logs = {}
+
+    def __init__(self, *args, **kwargs):
+        Base.__init__(self, *args, **kwargs)
+        self.kctl = Kubectl(*args, **kwargs)
+
+    def get_kctl_kwargs(self):
+
+        kwargs = {}
+        if int(self.lines) > 0:
+            kwargs["--tail"] = self.lines
+        if self.follow:
+            kwargs["--follow"] = self.follow
+
+        return kwargs
+
+    def check_errors(self, log):
+        parse_rgx = lambda x: Utility.format_color(str(x.group(0)))
+        regx = self.regx
+
+        if self.custom_regx:
+            regx = self.custom_regx
+        if self.highlight:
+            return re.sub(regx, parse_rgx, log)
+
+        return log
+
+    def print_log(self, log, owner="", color="blue", **kwargs):
+        colors = list(COLORS.keys())
+        owner = Utility.format_color(owner, color)
+        print(f"{owner}:{self.check_errors(log)}")
+
+    def save_log(self, log, owner):
+        if not self.save_output:
+            return
+        if owner in self.logs:
+            self.logs[owner] += self.logs[owner] + log
+        else:
+            self.logs[owner] = log
+
+        fname = owner + "-date-" + datetime.datetime.now().strftime("%m-%d-%Y") + ".log"
+        
+        with open(fname, "w") as f:
+            f.write(self.logs[owner])
+
+    def handle_log(self, log, owner="", color="", **kwargs):
+        self.print_log(log, owner=owner, color=color, **kwargs)
+        self.save_log(log, owner)
+
+    def run_from_thread(self, pod, kwargs):
+        # self.kctl.logs(pod, **kwargs)
+        t = threading.Thread(target=self.kctl.logs, args=(pod,), kwargs=kwargs, daemon=True)
+        t.name = pod
+        THREADS[pod] = {"thread": t}
+        t.start()
+
+    def main(self):
+        pods = self.kctl.get_pods(self.name, **{"-o": "wide"})
+
+        colors = list(COLORS.keys())
+        if len(pods) < 1:
+            Utility.error("Pods not found", sysexit=True)
+        for p in pods:
+            if not "name" in p:
+                continue
+            log_kwargs = self.get_kctl_kwargs()
+            log_kwargs["func"] = self.handle_log
+            log_kwargs["color"] = colors[random.randint(0, len(colors)-1)]
+
+            self.run_from_thread(p["name"], log_kwargs, )
+                    
+        if self.follow:
+            # Threads should not stop unless forced to
+            signal.pause()
+        else:
+            for k, v in THREADS.items():
+                v["thread"].join()
+        
+
+def get_cli_args():
+    parser = argparse.ArgumentParser(
+        description="Utility tool for observing kubernetes resources"
+    )
+    parser.add_argument("name", help="Resource name")
+    parser.add_argument("-n", "--namespace", help="Namespace", metavar="<arg>")
+    parser.add_argument(
+        "-i",
+        "--inverse",
+        help="Does not container 'name'",
+        default=Base.inverse,
+        action="store_true",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="Prints commands used",
+        default=Base.verbose,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "-ctx",
+        "--context",
+        help="Specify which context to use based on kube-config",
+        default=Base.context,
+        metavar="<name>",
+    )
+
+    parser.add_argument(
+        "-s",
+        "--save-output",
+        help="Saves output in a directory",
+        default=Base.save_output,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "-l",
+        "--lines",
+        help="No of lines to take from each log. Defaults to 1000",
+        default=Logger.lines,
+        metavar="<number>",
+    )
+
+    parser.add_argument(
+        "-f",
+        "--follow",
+        help="Follows logs",
+        default=Logger.follow,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "-hi",
+        "--highlight",
+        help="Will highlight errors and warnings",
+        default=Logger.highlight,
+        action="store_true",
+    )
+
+    # INCOMPLETE FEATURE TODO
+    # logs_parser.add_argument(
+    #     "-ct",
+    #     "--container",
+    #     help="Grab logs from a specific container",
+    # )
+
+    parser.add_argument(
+        "-regx",
+        "--custom-regx",
+        help="Will highlight output based on the regx provided",
+        default=Logger.custom_regx,
+        metavar="<^some_word$>",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = get_cli_args()
+    try:
+        Logger(**vars(args)).main()
+    except KeyboardInterrupt:
+        print('Bye bye')

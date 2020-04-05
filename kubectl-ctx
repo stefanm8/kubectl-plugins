@@ -37,7 +37,8 @@ def prompt(content):
         print()
         display([*content])
         try:
-            val = str(input(color(f"Select option (1-{len(content)}): ", "underline")))
+            # Minus the header 
+            val = str(input(color(f"Select option (1-{len(content)-1}): ", "underline"))) 
             if val.isdigit() and int(val) < len(content):
                 return int(val)
         except NameError:
@@ -45,7 +46,7 @@ def prompt(content):
         print("Invalid input")
         return choice()
 
-    value = choice() - 1
+    value = choice()
     return tuple(content[value].split())
 
 def search_context(contexts, needle):
@@ -60,17 +61,13 @@ def search_context(contexts, needle):
     return ctx[0].replace("*", '')
 
 def main(args, contexts):
-    if args.ctx == 0 and not args.interactive:
-        display(contexts)
-        return
-
     if args.interactive:
         ch = tuple(prompt(contexts))
         if len(ch) == 4:
             name = ch[0]
         else:
             name = ch[1]
-        out = cmd("config use-context {}".format(name))
+        print(' '.join(cmd(f"config use-context {name}")))
         return
 
     try:
@@ -84,7 +81,6 @@ def main(args, contexts):
         pass
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser("Select Context")
     parser.add_argument("ctx", help="context to switch", nargs="*")
     parser.add_argument("-i", "--interactive", help="select context interactively", action="store_true")
@@ -96,7 +92,8 @@ if __name__ == "__main__":
         display(contexts)
         sys.exit(0)
 
-    args.ctx = args.ctx[0]
+    if len(args.ctx) > 0:
+        args.ctx = args.ctx[0]
     try:
         main(args, contexts)
     except KeyboardInterrupt:
